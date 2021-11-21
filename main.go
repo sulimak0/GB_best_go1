@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -29,7 +30,7 @@ type page struct {
 	doc *goquery.Document
 }
 
-func NewPage(raw io.Reader) (Page, error) {
+func NewPage(raw io.Reader) (*page, error) {
 	doc, err := goquery.NewDocumentFromReader(raw)
 	if err != nil {
 		return nil, err
@@ -94,26 +95,29 @@ func (r requester) Get(ctx context.Context, url string) (Page, error) {
 type Crawler interface {
 	Scan(ctx context.Context, url string, depth int)
 	ChanResult() <-chan CrawlResult
+	AddDepth(delta int)
 }
 
 type crawler struct {
-	r       Requester
-	res     chan CrawlResult
-	visited map[string]struct{}
-	mu      sync.RWMutex
+	r        Requester
+	res      chan CrawlResult
+	visited  map[string]struct{}
+	mu       sync.RWMutex
+	maxDepth int
 }
 
-func NewCrawler(r Requester) *crawler {
+func NewCrawler(r Requester, maxDepth int) *crawler {
 	return &crawler{
-		r:       r,
-		res:     make(chan CrawlResult),
-		visited: make(map[string]struct{}),
-		mu:      sync.RWMutex{},
+		r:        r,
+		res:      make(chan CrawlResult),
+		visited:  make(map[string]struct{}),
+		mu:       sync.RWMutex{},
+		maxDepth: maxDepth,
 	}
 }
 
 func (c *crawler) Scan(ctx context.Context, url string, depth int) {
-	if depth <= 0 { //Проверяем то, что есть запас по глубине
+	if depth >= c.maxDepth+1 { //Проверяем то, что есть запас по глубине
 		return
 	}
 	c.mu.RLock()
@@ -122,30 +126,41 @@ func (c *crawler) Scan(ctx context.Context, url string, depth int) {
 	if ok {
 		return
 	}
-	select {
-	case <-ctx.Done(): //Если контекст завершен - прекращаем выполнение
+	page, err := c.r.Get(ctx, url) //Запрашиваем страницу через Requester
+	if err != nil {
+		c.res <- CrawlResult{Err: err} //Записываем ошибку в канал
 		return
-	default:
-		page, err := c.r.Get(ctx, url) //Запрашиваем страницу через Requester
-		if err != nil {
-			c.res <- CrawlResult{Err: err} //Записываем ошибку в канал
+	}
+	c.mu.Lock()
+	c.visited[url] = struct{}{} //Помечаем страницу просмотренной
+	c.mu.Unlock()
+	c.res <- CrawlResult{ //Отправляем результаты в канал
+		Title: page.GetTitle(),
+		Url:   url,
+	}
+	for {
+		select {
+		case <-ctx.Done(): //Если контекст завершен - прекращаем выполнение
 			return
-		}
-		c.mu.Lock()
-		c.visited[url] = struct{}{} //Помечаем страницу просмотренной
-		c.mu.Unlock()
-		c.res <- CrawlResult{ //Отправляем результаты в канал
-			Title: page.GetTitle(),
-			Url:   url,
-		}
-		for _, link := range page.GetLinks() {
-			go c.Scan(ctx, link, depth-1) //На все полученные ссылки запускаем новую рутину сборки
+		default:
+			if c.maxDepth > depth {
+				for _, link := range page.GetLinks() {
+					go c.Scan(ctx, link, depth+1) //На все полученные ссылки запускаем новую рутину сборки
+				}
+				return
+			}
 		}
 	}
 }
 
 func (c *crawler) ChanResult() <-chan CrawlResult {
 	return c.res
+}
+
+func (c *crawler) AddDepth(delta int) {
+	c.mu.Lock()
+	c.maxDepth += delta
+	c.mu.Unlock()
 }
 
 //Config - структура для конфигурации
@@ -158,32 +173,43 @@ type Config struct {
 }
 
 func main() {
-
 	cfg := Config{
-		MaxDepth:   3,
-		MaxResults: 10,
-		MaxErrors:  5,
-		Url:        "https://telegram.org",
-		Timeout:    10,
+		MaxDepth:   1,
+		MaxResults: 10000,
+		MaxErrors:  10000,
+		Url:        "https://golang.org",
+		Timeout:    15,
 	}
+	fmt.Println(os.Getpid())
+
 	var cr Crawler
 	var r Requester
 
 	r = NewRequester(time.Duration(cfg.Timeout) * time.Second)
-	cr = NewCrawler(r)
+	cr = NewCrawler(r, cfg.MaxDepth)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go cr.Scan(ctx, cfg.Url, cfg.MaxDepth) //Запускаем краулер в отдельной рутине
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeout)*time.Second)
+	//ctx, cancel := context.WithCancel(context.Background())
+
+	go cr.Scan(ctx, cfg.Url, 0)            //Запускаем краулер в отдельной рутине
 	go processResult(ctx, cancel, cr, cfg) //Обрабатываем результаты в отдельной рутине
 
-	sigCh := make(chan os.Signal)        //Создаем канал для приема сигналов
-	signal.Notify(sigCh, syscall.SIGINT) //Подписываемся на сигнал SIGINT
+	sigCh := make(chan os.Signal)                          //Создаем канал для приема сигналов
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGUSR1) //Подписываемся на сигнал SIGINT
 	for {
 		select {
-		case <-ctx.Done(): //Если всё завершили - выходим
+		case <-ctx.Done():
+			log.Printf("ctx done\n")
 			return
-		case <-sigCh:
-			cancel() //Если пришёл сигнал SigInt - завершаем контекст
+		case s := <-sigCh:
+			switch s {
+			case syscall.SIGUSR1:
+				log.Printf("SIGUSR1\n")
+				cr.AddDepth(2)
+			case syscall.SIGTERM:
+				log.Printf("SIGTERM\n")
+				cancel()
+			}
 		}
 	}
 }
