@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"go.uber.org/zap"
 	"io"
 	"log"
 	"net/http"
@@ -27,15 +27,17 @@ type Page interface {
 }
 
 type page struct {
-	doc *goquery.Document
+	doc  *goquery.Document
+	slog *zap.SugaredLogger
 }
 
-func NewPage(raw io.Reader) (*page, error) {
+func NewPage(raw io.Reader, slog *zap.SugaredLogger) (*page, error) {
 	doc, err := goquery.NewDocumentFromReader(raw)
 	if err != nil {
+		slog.Debugf("can't be parsed: %s", err)
 		return nil, err
 	}
-	return &page{doc: doc}, nil
+	return &page{doc: doc, slog: slog}, nil
 }
 
 func (p *page) GetTitle() string {
@@ -59,10 +61,11 @@ type Requester interface {
 
 type requester struct {
 	timeout time.Duration
+	slog    *zap.SugaredLogger
 }
 
-func NewRequester(timeout time.Duration) requester {
-	return requester{timeout: timeout}
+func NewRequester(timeout time.Duration, slog *zap.SugaredLogger) requester {
+	return requester{timeout: timeout, slog: slog}
 }
 
 func (r requester) Get(ctx context.Context, url string) (Page, error) {
@@ -75,15 +78,18 @@ func (r requester) Get(ctx context.Context, url string) (Page, error) {
 		}
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
+			r.slog.Debugf("can't create http.Request: %s", err)
 			return nil, err
 		}
 		body, err := cl.Do(req)
 		if err != nil {
+			r.slog.Debugf("http transport error: %s", err)
 			return nil, err
 		}
 		defer body.Body.Close()
-		page, err := NewPage(body.Body)
+		page, err := NewPage(body.Body, r.slog)
 		if err != nil {
+			r.slog.Debugf("can't create page: %s", err)
 			return nil, err
 		}
 		return page, nil
@@ -104,15 +110,17 @@ type crawler struct {
 	visited  map[string]struct{}
 	mu       sync.RWMutex
 	maxDepth int
+	slog     *zap.SugaredLogger
 }
 
-func NewCrawler(r Requester, maxDepth int) *crawler {
+func NewCrawler(r Requester, maxDepth int, slog *zap.SugaredLogger) *crawler {
 	return &crawler{
 		r:        r,
 		res:      make(chan CrawlResult),
 		visited:  make(map[string]struct{}),
 		mu:       sync.RWMutex{},
 		maxDepth: maxDepth,
+		slog:     slog,
 	}
 }
 
@@ -128,6 +136,7 @@ func (c *crawler) Scan(ctx context.Context, url string, depth int) {
 	}
 	page, err := c.r.Get(ctx, url) //Запрашиваем страницу через Requester
 	if err != nil {
+		c.slog.Debugf("can't get page: %s", err)
 		c.res <- CrawlResult{Err: err} //Записываем ошибку в канал
 		return
 	}
@@ -145,7 +154,9 @@ func (c *crawler) Scan(ctx context.Context, url string, depth int) {
 		default:
 			if c.maxDepth > depth {
 				for _, link := range page.GetLinks() {
-					go c.Scan(ctx, link, depth+1) //На все полученные ссылки запускаем новую рутину сборки
+					newDepth := depth + 1
+					c.slog.Debugw("started new Scan goroutine", "depth", newDepth)
+					go c.Scan(ctx, link, newDepth) //На все полученные ссылки запускаем новую рутину сборки
 				}
 				return
 			}
@@ -173,6 +184,14 @@ type Config struct {
 }
 
 func main() {
+	logger, err := zap.NewProduction()
+	if err != nil {
+		log.Fatalf("can't init logger: %s", err)
+	}
+	defer logger.Sync()
+	slog := logger.Sugar()
+	slog.Infof("init logger")
+
 	cfg := Config{
 		MaxDepth:   1,
 		MaxResults: 10000,
@@ -180,41 +199,42 @@ func main() {
 		Url:        "https://golang.org",
 		Timeout:    15,
 	}
-	fmt.Println(os.Getpid())
+	slog.Infow("read config", "config", cfg)
+	slog.Debugw("process id", "id", os.Getpid())
 
 	var cr Crawler
 	var r Requester
 
-	r = NewRequester(time.Duration(cfg.Timeout) * time.Second)
-	cr = NewCrawler(r, cfg.MaxDepth)
+	r = NewRequester(time.Duration(cfg.Timeout)*time.Second, slog)
+	cr = NewCrawler(r, cfg.MaxDepth, slog)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeout)*time.Second)
 	//ctx, cancel := context.WithCancel(context.Background())
 
-	go cr.Scan(ctx, cfg.Url, 0)            //Запускаем краулер в отдельной рутине
-	go processResult(ctx, cancel, cr, cfg) //Обрабатываем результаты в отдельной рутине
+	go cr.Scan(ctx, cfg.Url, 0)                  //Запускаем краулер в отдельной рутине
+	go processResult(ctx, cancel, cr, cfg, slog) //Обрабатываем результаты в отдельной рутине
 
 	sigCh := make(chan os.Signal)                          //Создаем канал для приема сигналов
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGUSR1) //Подписываемся на сигнал SIGINT
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("ctx done\n")
+			slog.Warnw("ctx done")
 			return
 		case s := <-sigCh:
 			switch s {
 			case syscall.SIGUSR1:
-				log.Printf("SIGUSR1\n")
+				slog.Infow("SIGURSR1")
 				cr.AddDepth(2)
 			case syscall.SIGTERM:
-				log.Printf("SIGTERM\n")
+				slog.Infow("SIGTERM")
 				cancel()
 			}
 		}
 	}
 }
 
-func processResult(ctx context.Context, cancel func(), cr Crawler, cfg Config) {
+func processResult(ctx context.Context, cancel func(), cr Crawler, cfg Config, slog *zap.SugaredLogger) {
 	var maxResult, maxErrors = cfg.MaxResults, cfg.MaxErrors
 	for {
 		select {
@@ -223,14 +243,14 @@ func processResult(ctx context.Context, cancel func(), cr Crawler, cfg Config) {
 		case msg := <-cr.ChanResult():
 			if msg.Err != nil {
 				maxErrors--
-				log.Printf("crawler result return err: %s\n", msg.Err.Error())
+				slog.Warnf("crawler result return err: %s", msg.Err.Error())
 				if maxErrors <= 0 {
 					cancel()
 					return
 				}
 			} else {
 				maxResult--
-				log.Printf("crawler result: [url: %s] Title: %s\n", msg.Url, msg.Title)
+				slog.Infof("crawler result: [url: %s] Title: %s", msg.Url, msg.Title)
 				if maxResult <= 0 {
 					cancel()
 					return
