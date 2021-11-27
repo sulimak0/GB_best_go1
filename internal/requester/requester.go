@@ -16,14 +16,15 @@ var (
 
 type requester struct {
 	timeout time.Duration
+	tran    http.RoundTripper
 	slog    *zap.SugaredLogger
 }
 
-func NewRequester(timeout time.Duration, slog *zap.SugaredLogger) (*requester, error) {
+func NewRequester(timeout time.Duration, tran http.RoundTripper, slog *zap.SugaredLogger) (*requester, error) {
 	if timeout <= 0 {
 		return nil, errIncorrectTimeout
 	}
-	return &requester{timeout: timeout, slog: slog}, nil
+	return &requester{timeout: timeout, tran: tran, slog: slog}, nil
 }
 
 func (r requester) Get(ctx context.Context, url string) (domain.Page, error) {
@@ -32,7 +33,8 @@ func (r requester) Get(ctx context.Context, url string) (domain.Page, error) {
 		return nil, nil
 	default:
 		cl := &http.Client{
-			Timeout: r.timeout,
+			Timeout:   r.timeout,
+			Transport: r.tran,
 		}
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {

@@ -54,33 +54,29 @@ func (c *crawler) Scan(ctx context.Context, url string, depth uint64) {
 	if ok {
 		return
 	}
-	for {
-		select {
-		case <-ctx.Done(): //Если контекст завершен - прекращаем выполнение
+	select {
+	case <-ctx.Done(): //Если контекст завершен - прекращаем выполнение
+		return
+	default:
+		//Запрашиваем страницу через Requester
+		p, err := c.r.Get(ctx, url)
+		if err != nil {
+			c.slog.Debugf("can't get page: %s", err)
+			c.res <- models.CrawlResult{Err: err}
 			return
-		default:
-			//Запрашиваем страницу через Requester
-			p, err := c.r.Get(ctx, url)
-			if err != nil {
-				c.slog.Debugf("can't get page: %s", err)
-				c.res <- models.CrawlResult{Err: err}
-				return
-			}
-			//Помечаем страницу просмотренной и отправляем резуальтат в канал
-			c.mu.Lock()
-			c.visited[url] = struct{}{}
-			c.mu.Unlock()
-			c.res <- models.CrawlResult{
-				Title: p.GetTitle(),
-				Url:   url,
-			}
-			for _, link := range p.GetLinks() {
-				newDepth := depth + 1
-				c.slog.Debugw("started new Scan goroutine", "depth", newDepth)
-				go c.Scan(ctx, link, newDepth) //На все полученные ссылки запускаем новую рутину сборки
-			}
-
 		}
+		//Помечаем страницу просмотренной и отправляем резуальтат в канал
+		c.mu.Lock()
+		c.visited[url] = struct{}{}
+		c.mu.Unlock()
+		c.res <- models.CrawlResult{
+			Title: p.GetTitle(),
+			Url:   url,
+		}
+		for _, link := range p.GetLinks() {
+			go c.Scan(ctx, link, depth+1) //На все полученные ссылки запускаем новую рутину сборки
+		}
+
 	}
 
 }

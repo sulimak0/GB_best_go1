@@ -34,7 +34,7 @@ func main() {
 	slog.Infow("read config", "config", cfg)
 	slog.Infow("process id", "id", os.Getpid())
 
-	r, err := requester.NewRequester(time.Duration(cfg.RequestTimeout)*time.Second, slog)
+	r, err := requester.NewRequester(time.Duration(cfg.RequestTimeout)*time.Second, nil, slog)
 	if err != nil {
 		slog.Errorf("requester initialize error: %s", err)
 		return
