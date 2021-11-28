@@ -11,7 +11,7 @@ import (
 
 var (
 	startUrl = "https://golang.org"
-)
+) //  `testPage` is unused (deadcode)
 
 func TestCrawler_Scan(t *testing.T) {
 	wantLinks := []string{

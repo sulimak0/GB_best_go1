@@ -19,7 +19,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("can't init logger: %s", err)
 	}
-	defer func() {
+	defer func() { // Error return value of `logger.Sync` is not checked (errcheck)
 		err := logger.Sync()
 		if err != nil {
 			log.Fatalf("can't sync logger: %s", err)
@@ -60,7 +60,7 @@ func main() {
 
 	srv.Run()
 
-	sigCh := make(chan os.Signal, 1)                       //Создаем канал для приема сигналов
+	sigCh := make(chan os.Signal, 1)                       // `testPage` is unused (deadcode)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGUSR1) //Подписываемся на сигнал SIGINT и SIGUSR1
 
 	for {
