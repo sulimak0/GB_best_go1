@@ -11,19 +11,6 @@ import (
 
 var (
 	startUrl = "https://golang.org"
-	testPage = `<!doctype html>
-		<html lang="en">
-			<head>
-    			<meta charset="utf-8">
-    			<title>Home</title>
-			</head>
-			<body>
-    			<h1>Mock</h1>
-    			<a href="https://golang1.org">Home</a>
-				<a href="https://golang2.org">Home</a>
-				<a href="https://golang3.org">Home</a>
-			</body>
-		</html>`
 )
 
 func TestCrawler_Scan(t *testing.T) {

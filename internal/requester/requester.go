@@ -54,5 +54,4 @@ func (r requester) Get(ctx context.Context, url string) (domain.Page, error) {
 		}
 		return page, nil
 	}
-	return nil, nil
 }

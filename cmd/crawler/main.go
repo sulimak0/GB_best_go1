@@ -19,7 +19,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("can't init logger: %s", err)
 	}
-	defer logger.Sync()
+	defer func() {
+		err := logger.Sync()
+		if err != nil {
+			log.Fatalf("can't sync logger: %s", err)
+		}
+	}()
 	slog := logger.Sugar()
 	slog.Infof("init logger")
 
@@ -55,7 +60,7 @@ func main() {
 
 	srv.Run()
 
-	sigCh := make(chan os.Signal)                          //Создаем канал для приема сигналов
+	sigCh := make(chan os.Signal, 1)                       //Создаем канал для приема сигналов
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGUSR1) //Подписываемся на сигнал SIGINT и SIGUSR1
 
 	for {
